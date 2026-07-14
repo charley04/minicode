@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Package artifacts
+*.tgz
+
+# Session data
+sessions/
+
+# Test workspaces
+test-ws/
+test-workspace/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Config with potential secrets
+.minicode/config.json
+
+# Lock files (keep package-lock.json for reproducible installs)
+# Uncomment to ignore:
+# package-lock.json
