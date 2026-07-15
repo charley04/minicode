@@ -18,12 +18,21 @@ export interface Tool {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
-  execute: (args: Record<string, unknown>) => Promise<ToolResult>;
+  execute: (args: Record<string, unknown>, ctx?: ToolContext) => Promise<ToolResult>;
   requirePermission: boolean;
 }
 
+export interface ToolContext {
+  signal?: AbortSignal;
+}
+
+export type ApprovalDecision = "once" | "always" | "deny" | "stop";
+
 export interface ToolResult {
+  /** Text sent back to the LLM. Should be plain (no ANSI, no huge diffs). */
   output: string;
+  /** Optional richer text shown to the human (e.g. colored diff). Falls back to output. */
+  display?: string;
   error?: boolean;
 }
 
@@ -122,7 +131,7 @@ export interface TodoItem {
 export type AgentEvent =
   | { type: "text"; content: string }
   | { type: "tool_call"; name: string; args: Record<string, unknown> }
-  | { type: "tool_result"; name: string; output: string; error?: boolean }
+  | { type: "tool_result"; name: string; output: string; display?: string; error?: boolean }
   | { type: "permission_request"; name: string; args: Record<string, unknown> }
   | { type: "usage"; usage: TokenUsage }
   | { type: "thinking"; content: string }

@@ -14,6 +14,7 @@ export interface CommandDef {
 export function getSlashCommands(): CommandDef[] {
   return [
     { name: "/help", description: "Show help" },
+    { name: "/status", description: "Show current model & session state" },
     { name: "/exit", description: "Exit (saves session)" },
     { name: "/quit", description: "Exit (saves session)" },
     { name: "/clear", description: "Clear conversation" },

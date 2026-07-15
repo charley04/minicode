@@ -32,7 +32,9 @@ import { PluginManager } from "./plugins.js";
 import { Sandbox } from "./sandbox.js";
 import { setSandbox } from "./tools/bash.js";
 import { startServer } from "./server.js";
-import type { AppConfig, AgentEvent, Session } from "./types.js";
+import type { AppConfig, AgentEvent, Session, ApprovalDecision } from "./types.js";
+import { renderToolCallInline, renderToolResult, renderApprovalPreview } from "./renderers.js";
+import { DIFF_MARKER } from "./tools/write.js";
 
 const VERSION = "0.3.0";
 
@@ -374,24 +376,16 @@ async function runOneShot(config: AppConfig, useSkills: boolean, useMcp: boolean
         textBuffer += event.content;
       } else if (event.type === "tool_call") {
         if (hasBufferedText && textBuffer.trim()) {
-          const rendered = renderMarkdown(textBuffer);
-          stdout.write("\n  " + rendered + "\n");
+          stdout.write(renderAssistantBlock(textBuffer));
           textBuffer = "";
           hasBufferedText = false;
         }
         console.log(
-          chalk.yellow("  ⚡ ") + chalk.bold(event.name) +
-          chalk.gray(" " + truncateArgs(event.args)),
+          chalk.yellow("  ⚡ ") + chalk.bold(event.name) + "  " +
+          renderToolCallInline(event.name, event.args),
         );
       } else if (event.type === "tool_result") {
-        const lines = event.output.split("\n");
-        const maxLines = 15;
-        const preview = lines.slice(0, maxLines).join("\n");
-        const truncation = lines.length > maxLines
-          ? chalk.gray(`\n  ... (${lines.length - maxLines} more lines)`)
-          : "";
-        const icon = event.error ? chalk.red("  ✗ ") : chalk.green("  ✓ ");
-        console.log(icon + chalk.gray(preview) + truncation);
+        console.log(renderToolResult(event.name, event.display ?? event.output, event.error === true, "  "));
       } else if (event.type === "todo_update") {
         progress.update(event.todos);
       } else if (event.type === "error") {
@@ -410,8 +404,7 @@ async function runOneShot(config: AppConfig, useSkills: boolean, useMcp: boolean
     progress.clear();
 
     if (hasBufferedText && textBuffer.trim()) {
-      const rendered = renderMarkdown(textBuffer);
-      stdout.write("\n  " + rendered + "\n");
+      stdout.write(renderAssistantBlock(textBuffer));
     }
 
     if (progress.hasTodos()) {
@@ -432,16 +425,7 @@ async function runInteractive(config: AppConfig, useSkills: boolean, useMcp: boo
   const mcpServerCount = mcp?.getServerNames().length || 0;
   const mcpToolCount = mcp?.getTools().length || 0;
 
-  console.log(chalk.bold.cyan(`\n  ╭──────────────────────────────────────╮`));
-  console.log(chalk.bold.cyan(`  │          MiniCode v${VERSION}              │`));
-  console.log(chalk.bold.cyan(`  ╰──────────────────────────────────────╯`));
-  console.log(chalk.gray(`  Model: ${config.model}`));
-  console.log(chalk.gray(`  SDK:   ${config.provider}`));
-  if (config.baseUrl) console.log(chalk.gray(`  URL:   ${config.baseUrl}`));
-  if (skillCount > 0) console.log(chalk.gray(`  Skills: ${skillCount} loaded`));
-  if (mcpServerCount > 0) console.log(chalk.gray(`  MCP: ${mcpServerCount} servers, ${mcpToolCount} tools`));
-  if (config.sandbox) console.log(chalk.gray(`  Sandbox: enabled`));
-  if (config.autoApprove) console.log(chalk.yellow(`  Auto-approve: ON`));
+  renderBanner(config, { skills: skillCount, mcpServers: mcpServerCount, mcpTools: mcpToolCount });
   console.log(chalk.gray(`  Type /help for commands, /exit to quit.\n`));
 
   let session: Session;
@@ -455,9 +439,11 @@ async function runInteractive(config: AppConfig, useSkills: boolean, useMcp: boo
     console.log(chalk.gray(`  Resumed: ${session.id}\n`));
     for (const msg of session.messages) {
       if (msg.role === "user") {
-        console.log(chalk.green("  user> ") + msg.content);
+        console.log(chalk.green.bold("  ▶ user"));
+        const content = msg.content ?? "";
+        console.log(chalk.gray("  │ ") + content.split("\n").join("\n" + chalk.gray("  │ ")));
       } else if (msg.role === "assistant" && msg.content) {
-        console.log(chalk.blue("  assistant> ") + msg.content);
+        stdout.write(renderAssistantBlock(msg.content));
       }
     }
   } else {
@@ -474,22 +460,133 @@ async function runInteractive(config: AppConfig, useSkills: boolean, useMcp: boo
   const rl = createInterface({
     input: stdin,
     output: stdout,
-    prompt: chalk.green("\n  user> "),
+    prompt: buildPrompt(config),
     completer: createCompleter(),
   });
 
+  // Enable bracketed paste mode: multi-line clipboard input arrives wrapped in
+  // ESC[200~ ... ESC[201~. We intercept stdin BEFORE readline sees it: paste
+  // bytes are captured (never forwarded to readline, so they can't trigger
+  // premature line submits), while non-paste bytes are passed through
+  // untouched. When a paste finishes we inject a short placeholder into
+  // readline's buffer and store the real payload for later.
+  stdout.write("\x1b[?2004h");
+  const PASTE_START = "\x1b[200~";
+  const PASTE_END = "\x1b[201~";
+  let pasting = false;
+  let pasteBuf = "";
+  const pendingPastes: Array<{ token: string; text: string }> = [];
+
+  // Snapshot the data listeners readline already installed on stdin, then
+  // remove them. Our proxy will forward filtered chunks to those listeners.
+  const rlDataListeners = stdin.listeners("data").slice() as Array<(chunk: Buffer) => void>;
+  for (const fn of rlDataListeners) stdin.removeListener("data", fn as any);
+
+  const forwardToReadline = (bytes: Buffer) => {
+    if (bytes.length === 0) return;
+    for (const fn of rlDataListeners) fn(bytes);
+  };
+
+  const insertPasteToken = (payload: string) => {
+    const token = `[paste#${pendingPastes.length + 1}:${payload.split("\n").length}L]`;
+    pendingPastes.push({ token, text: payload });
+    // Feed the placeholder into readline so it appears on the current line.
+    forwardToReadline(Buffer.from(token, "utf-8"));
+  };
+
+  const pasteProxy = (buf: Buffer) => {
+    const s = buf.toString("utf-8");
+    let i = 0;
+    let passthrough = "";
+    while (i < s.length) {
+      if (!pasting) {
+        const idx = s.indexOf(PASTE_START, i);
+        if (idx < 0) {
+          passthrough += s.slice(i);
+          break;
+        }
+        passthrough += s.slice(i, idx);
+        i = idx + PASTE_START.length;
+        pasting = true;
+        pasteBuf = "";
+      } else {
+        const idx = s.indexOf(PASTE_END, i);
+        if (idx < 0) {
+          pasteBuf += s.slice(i);
+          break;
+        }
+        pasteBuf += s.slice(i, idx);
+        i = idx + PASTE_END.length;
+        pasting = false;
+        // Flush any accumulated passthrough BEFORE injecting the token so
+        // characters typed around the paste keep their order.
+        if (passthrough.length > 0) {
+          forwardToReadline(Buffer.from(passthrough, "utf-8"));
+          passthrough = "";
+        }
+        const payload = pasteBuf.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        pasteBuf = "";
+        insertPasteToken(payload);
+      }
+    }
+    if (passthrough.length > 0) {
+      forwardToReadline(Buffer.from(passthrough, "utf-8"));
+    }
+  };
+  stdin.on("data", pasteProxy);
+
   let isProcessing = false;
+  let activeController: AbortController | null = null;
+  let interruptRequested = false;
+  let lastCtrlCTime = 0;
 
   rl.prompt();
 
   process.stdin.on("keypress", (char: string, key: { name?: string; ctrl?: boolean; meta?: boolean } | undefined) => {
-    if (isProcessing) return;
-    handleKeyPress(char, key, rl.line);
+    if (!isProcessing) {
+      handleKeyPress(char, key, rl.line);
+      return;
+    }
+
+    // While the agent is running, capture ESC and Ctrl+C for interrupt.
+    if (key?.name === "escape") {
+      if (!interruptRequested && activeController) {
+        interruptRequested = true;
+        activeController.abort();
+        stdout.write("\r\x1b[2K");
+        console.log(chalk.yellow("  ⏸  Interrupt requested (ESC) — stopping..."));
+      }
+      return;
+    }
+    if (key?.ctrl && key.name === "c") {
+      const now = Date.now();
+      if (activeController && !interruptRequested) {
+        interruptRequested = true;
+        activeController.abort();
+        stdout.write("\r\x1b[2K");
+        console.log(chalk.yellow("  ⏸  Interrupt requested (Ctrl+C) — press again to exit."));
+        lastCtrlCTime = now;
+      } else if (now - lastCtrlCTime < 2000) {
+        // Double Ctrl+C → exit
+        console.log(chalk.gray("\n  Exiting..."));
+        process.exit(130);
+      }
+      return;
+    }
   });
 
   rl.on("line", async (input) => {
     clearHint();
-    const trimmed = input.trim();
+
+    // Splice any paste tokens back into their real multi-line text.
+    let expanded = input;
+    if (pendingPastes.length > 0) {
+      for (const p of pendingPastes) {
+        expanded = expanded.split(p.token).join(p.text);
+      }
+      pendingPastes.length = 0;
+    }
+    const trimmed = expanded.trim();
 
     if (!trimmed) {
       rl.prompt();
@@ -507,6 +604,8 @@ async function runInteractive(config: AppConfig, useSkills: boolean, useMcp: boo
     }
 
     isProcessing = true;
+    interruptRequested = false;
+    activeController = new AbortController();
     session.messages.push({ role: "user", content: trimmed });
 
     const tools = new ToolRegistry();
@@ -514,17 +613,26 @@ async function runInteractive(config: AppConfig, useSkills: boolean, useMcp: boo
       tools.registerMany(mcp.getTools());
     }
 
-    const spinner = new Spinner("Thinking");
+    const spinner = new Spinner("Contacting model...");
     let spinnerActive = false;
     let textBuffer = "";
     let hasBufferedText = false;
+    let sessionTotalTokens = tokenTracker.getSessionUsage().total.totalTokens;
     const progress = new ProgressRenderer();
+
+    const updateSpinner = (base: string) => {
+      const tokenTag = sessionTotalTokens > 0
+        ? chalk.gray(` · ${formatTokens(sessionTotalTokens)} tokens`)
+        : "";
+      spinner.update(base + tokenTag);
+    };
 
     const agent = new Agent({
       config,
       tools,
       skills,
       tokenTracker,
+      signal: activeController.signal,
       onEvent: (event) => {
         if (event.type === "text") {
           if (!hasBufferedText) {
@@ -537,8 +645,7 @@ async function runInteractive(config: AppConfig, useSkills: boolean, useMcp: boo
           textBuffer += event.content;
         } else if (event.type === "tool_call") {
           if (hasBufferedText && textBuffer.trim()) {
-            const rendered = renderMarkdown(textBuffer);
-            stdout.write("\n  " + rendered + "\n");
+            stdout.write(renderAssistantBlock(textBuffer));
             textBuffer = "";
             hasBufferedText = false;
           } else if (hasBufferedText) {
@@ -546,24 +653,50 @@ async function runInteractive(config: AppConfig, useSkills: boolean, useMcp: boo
             textBuffer = "";
             hasBufferedText = false;
           }
+          if (spinnerActive) {
+            spinner.stop();
+            spinnerActive = false;
+          }
           stdout.write("\n");
           console.log(
-            chalk.yellow("  ⚡ ") + chalk.bold(event.name) +
-            chalk.gray(" " + truncateArgs(event.args)),
+            chalk.yellow("  ⚡ ") + chalk.bold(event.name) + "  " +
+            renderToolCallInline(event.name, event.args),
           );
+          // Restart spinner to show "Running <name>..." until result arrives
+          updateSpinner(`Running ${event.name}...`);
+          spinner.start();
+          spinnerActive = true;
         } else if (event.type === "tool_result") {
-          const lines = event.output.split("\n");
-          const maxLines = 15;
-          const preview = lines.slice(0, maxLines).join("\n");
-          const truncation = lines.length > maxLines
-            ? chalk.gray(`\n  ... (${lines.length - maxLines} more lines)`)
-            : "";
-          const icon = event.error ? chalk.red("  ✗ ") : chalk.green("  ✓ ");
-          console.log(icon + chalk.gray(preview) + truncation);
+          if (spinnerActive) {
+            spinner.stop();
+            spinnerActive = false;
+          }
+          console.log(renderToolResult(event.name, event.display ?? event.output, event.error === true, "  "));
+          // After tool result, we're waiting for the next model call
+          updateSpinner("Thinking...");
+          spinner.start();
+          spinnerActive = true;
+        } else if (event.type === "usage") {
+          sessionTotalTokens = tokenTracker.getSessionUsage().total.totalTokens;
+          if (spinnerActive) {
+            // Refresh the spinner message with new token count
+            const currentMsg = (spinner as any).message?.split(" · ")[0] ?? "Thinking...";
+            updateSpinner(currentMsg);
+          }
         } else if (event.type === "todo_update") {
           progress.update(event.todos);
         } else if (event.type === "thinking") {
+          // Show reasoning as dim text (interactive mode used to swallow this)
+          if (spinnerActive) {
+            spinner.stop();
+            spinnerActive = false;
+          }
+          stdout.write(chalk.gray.dim(event.content));
         } else if (event.type === "error") {
+          if (spinnerActive) {
+            spinner.stop();
+            spinnerActive = false;
+          }
           console.error(chalk.red(`\n  [error] ${event.message}`));
         }
       },
@@ -574,19 +707,24 @@ async function runInteractive(config: AppConfig, useSkills: boolean, useMcp: boo
         }
         // Flush any buffered text before showing approval prompt
         if (hasBufferedText && textBuffer.trim()) {
-          const rendered = renderMarkdown(textBuffer);
-          stdout.write("\n  " + rendered + "\n");
+          stdout.write(renderAssistantBlock(textBuffer));
           textBuffer = "";
           hasBufferedText = false;
         }
-        return await promptApproval(name, args);
+        // Pause the main readline while we take over stdin for the key prompt.
+        rl.pause();
+        try {
+          const decision = await promptApproval(name, args);
+          return decision;
+        } finally {
+          rl.resume();
+        }
       },
     });
 
-    if (!hasBufferedText) {
-      spinner.start();
-      spinnerActive = true;
-    }
+    updateSpinner("Contacting model...");
+    spinner.start();
+    spinnerActive = true;
 
     try {
       const updated = await agent.run(session.messages);
@@ -598,8 +736,12 @@ async function runInteractive(config: AppConfig, useSkills: boolean, useMcp: boo
         spinner.stop();
         spinnerActive = false;
       }
-      const error = err as { message: string };
-      console.error(chalk.red(`\n  Error: ${error.message}`));
+      const error = err as { message: string; name?: string };
+      if (error.name === "AbortError" || interruptRequested) {
+        console.log(chalk.yellow(`\n  ⏸  Interrupted.`));
+      } else {
+        console.error(chalk.red(`\n  Error: ${error.message}`));
+      }
     }
 
     if (spinnerActive) {
@@ -612,8 +754,7 @@ async function runInteractive(config: AppConfig, useSkills: boolean, useMcp: boo
 
     // Flush any remaining buffered text as rendered markdown
     if (hasBufferedText && textBuffer.trim()) {
-      const rendered = renderMarkdown(textBuffer);
-      stdout.write("\n  " + rendered + "\n");
+      stdout.write(renderAssistantBlock(textBuffer));
       textBuffer = "";
       hasBufferedText = false;
     } else if (hasBufferedText) {
@@ -636,12 +777,16 @@ async function runInteractive(config: AppConfig, useSkills: boolean, useMcp: boo
     }
 
     console.log();
+    activeController = null;
+    interruptRequested = false;
     isProcessing = false;
     rl.prompt();
   });
 
   rl.on("close", async () => {
     clearHint();
+    stdout.write("\x1b[?2004l"); // disable bracketed paste
+    stdin.removeListener("data", pasteProxy);
     session.usage = tokenTracker.getSessionUsage();
     saveSession(session);
     await cleanup(mcp, plugins, session);
@@ -671,19 +816,12 @@ function handleEvent(event: AgentEvent, interactive: boolean) {
     case "tool_call":
       if (interactive) stdout.write("\n");
       console.log(
-        chalk.yellow("  ⚡ ") + chalk.bold(event.name) +
-        chalk.gray(" " + truncateArgs(event.args)),
+        chalk.yellow("  ⚡ ") + chalk.bold(event.name) + "  " +
+        renderToolCallInline(event.name, event.args),
       );
       break;
     case "tool_result": {
-      const lines = event.output.split("\n");
-      const maxLines = 15;
-      const preview = lines.slice(0, maxLines).join("\n");
-      const truncation = lines.length > maxLines
-        ? chalk.gray(`\n  ... (${lines.length - maxLines} more lines)`)
-        : "";
-      const icon = event.error ? chalk.red("  ✗ ") : chalk.green("  ✓ ");
-      console.log(icon + chalk.gray(preview) + truncation);
+      console.log(renderToolResult(event.name, event.display ?? event.output, event.error === true, "  "));
       break;
     }
     case "permission_request":
@@ -703,20 +841,173 @@ function truncateArgs(args: Record<string, unknown>): string {
   return str.length > 120 ? str.slice(0, 117) + "..." : str;
 }
 
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + "k";
+  return String(n);
+}
+
+/**
+ * Extract a short model label like "ark-code-latest" or the last "/"-segment
+ * for the prompt line. Full path stays in /status.
+ */
+function shortModelName(model: string): string {
+  const s = model.split("/").pop() || model;
+  return s.length > 32 ? s.slice(0, 29) + "…" : s;
+}
+
+function buildPrompt(config: AppConfig): string {
+  const model = chalk.gray(`[${shortModelName(config.model)}]`);
+  return `\n${model} ${chalk.green.bold("❯ ")}`;
+}
+
+function renderBanner(
+  config: AppConfig,
+  extras: { skills: number; mcpServers: number; mcpTools: number },
+): void {
+  const width = Math.min(process.stdout.columns || 80, 78);
+  const inner = width - 4;
+  const line = (s: string) => chalk.cyan("  │ ") + s + " ".repeat(Math.max(0, inner - stripAnsi(s).length)) + chalk.cyan(" │");
+  const bar = chalk.cyan("  ╭" + "─".repeat(inner + 2) + "╮");
+  const bot = chalk.cyan("  ╰" + "─".repeat(inner + 2) + "╯");
+  const title = chalk.bold.cyan("MiniCode") + chalk.gray(`  v${VERSION}`);
+  const rightHint = chalk.gray("terminal AI coding agent");
+  const spaces = Math.max(1, inner - stripAnsiVisibleLen(title) - stripAnsiVisibleLen(rightHint));
+  const titleRow = title + " ".repeat(spaces) + rightHint;
+
+  const modelRow = chalk.gray("model  ") + chalk.white(config.model);
+  const sdkRow = chalk.gray("sdk    ") + chalk.white(config.provider);
+  const urlRow = config.baseUrl ? chalk.gray("url    ") + chalk.gray(config.baseUrl) : "";
+  const cwdRow = chalk.gray("cwd    ") + chalk.gray(compressPath(process.cwd(), inner - 8));
+  const extraBits: string[] = [];
+  if (extras.skills > 0) extraBits.push(chalk.green(`skills:${extras.skills}`));
+  if (extras.mcpServers > 0) extraBits.push(chalk.green(`mcp:${extras.mcpServers}/${extras.mcpTools}`));
+  if (config.sandbox) extraBits.push(chalk.yellow("sandbox"));
+  if (config.autoApprove) extraBits.push(chalk.red.bold("auto-approve"));
+  const extrasRow = extraBits.length > 0 ? chalk.gray("plugins") + " " + extraBits.join(" ") : "";
+
+  console.log();
+  console.log(bar);
+  console.log(line(titleRow));
+  console.log(chalk.cyan("  │ ") + chalk.gray("─".repeat(inner)) + chalk.cyan(" │"));
+  console.log(line(modelRow));
+  console.log(line(sdkRow));
+  if (urlRow) console.log(line(urlRow));
+  console.log(line(cwdRow));
+  if (extrasRow) console.log(line(extrasRow));
+  console.log(bot);
+}
+
+function compressPath(p: string, max: number): string {
+  if (p.length <= max) return p;
+  const parts = p.replace(/\\/g, "/").split("/");
+  if (parts.length <= 2) return "…" + p.slice(-max + 1);
+  return parts[0] + "/…/" + parts.slice(-2).join("/");
+}
+
+function renderAssistantBlock(text: string): string {
+  const rendered = renderMarkdown(text);
+  // Prefix a subtle left rail so assistant output is visually distinct from
+  // user input and tool blocks. Each line gets "│ " on the left.
+  const lines = rendered.split("\n");
+  const rail = chalk.gray("  │ ");
+  const header = chalk.blue.bold("  ● assistant");
+  return "\n" + header + "\n" + lines.map((l) => rail + l).join("\n") + "\n";
+}
+
+function stripAnsi(str: string): string {
+  return str.replace(/\x1b\[[0-9;]*m/g, "");
+}
+function stripAnsiVisibleLen(s: string): number {
+  return stripAnsi(s).length;
+}
+
+/**
+ * Ask the user for permission using raw stdin. Returns a decision:
+ *   y / Enter → once
+ *   a → always allow this tool this session
+ *   n → deny once
+ *   s → deny and stop the agent
+ * Any other key defaults to deny.
+ *
+ * NOTE: This function takes over stdin from readline for the duration of the
+ * prompt. It saves and restores every existing stdin listener so that keys
+ * pressed here (like "y") do NOT leak into the main readline buffer.
+ */
 async function promptApproval(
   name: string,
   args: Record<string, unknown>,
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    const detail = JSON.stringify(args, null, 2).slice(0, 500);
-    console.log(chalk.yellow(`\n  ⚡ Permission required: ${chalk.bold(name)}`));
-    console.log(chalk.gray(`  ${detail}`));
+): Promise<ApprovalDecision> {
+  console.log(chalk.yellow(`\n  ⚡ Permission required: ${chalk.bold(name)}`));
+  console.log(renderApprovalPreview(name, args));
+  const prompt =
+    chalk.yellow("  Approve? ") +
+    chalk.bold("[y]") + chalk.gray("es / ") +
+    chalk.bold("[a]") + chalk.gray("lways / ") +
+    chalk.bold("[n]") + chalk.gray("o / ") +
+    chalk.bold("[s]") + chalk.gray("top ") +
+    chalk.yellow("> ");
 
-    const rl = createInterface({ input: stdin, output: stdout });
-    rl.question(chalk.yellow("  Approve? [y/N] "), (answer) => {
-      rl.close();
-      resolve(answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes");
-    });
+  return new Promise((resolve) => {
+    const wasRaw = stdin.isTTY ? stdin.isRaw : false;
+
+    // Snapshot every existing listener on stdin — readline, our own keypress
+    // watcher, etc. — and detach them so single keypresses can't leak into the
+    // main input buffer. We restore them all before resolving.
+    const savedData = stdin.listeners("data").slice() as Array<(...a: any[]) => void>;
+    const savedKeypress = stdin.listeners("keypress").slice() as Array<(...a: any[]) => void>;
+    const savedReadable = stdin.listeners("readable").slice() as Array<(...a: any[]) => void>;
+    for (const fn of savedData) stdin.removeListener("data", fn);
+    for (const fn of savedKeypress) stdin.removeListener("keypress", fn);
+    for (const fn of savedReadable) stdin.removeListener("readable", fn);
+
+    if (stdin.isTTY) {
+      try { stdin.setRawMode(true); } catch { /* ignore */ }
+    }
+    stdin.resume();
+    stdout.write(prompt);
+
+    const finish = (decision: ApprovalDecision, label: string) => {
+      stdin.removeListener("data", onData);
+      if (stdin.isTTY) {
+        try { stdin.setRawMode(wasRaw); } catch { /* ignore */ }
+      }
+      // Restore prior listeners
+      for (const fn of savedData) stdin.on("data", fn as any);
+      for (const fn of savedKeypress) stdin.on("keypress", fn as any);
+      for (const fn of savedReadable) stdin.on("readable", fn as any);
+      stdout.write(label + "\n");
+      resolve(decision);
+    };
+
+    const onData = (buf: Buffer) => {
+      // Only consider the FIRST byte of whatever arrived. A paste of "yyy\n"
+      // should count as a single "yes" — the rest is discarded so it can't
+      // spill into the next prompt or into the readline buffer.
+      const code = buf[0];
+      const ch = String.fromCharCode(code);
+      let decision: ApprovalDecision | null = null;
+      let isStop = false;
+      if (ch === "y" || ch === "Y" || code === 0x0d /* CR */ || code === 0x0a /* LF */) decision = "once";
+      else if (ch === "a" || ch === "A") decision = "always";
+      else if (ch === "n" || ch === "N") decision = "deny";
+      else if (ch === "s" || ch === "S") { decision = "deny"; isStop = true; }
+      else if (code === 0x03) decision = "deny"; // Ctrl+C
+      else if (code === 0x1b) decision = "deny"; // ESC
+
+      if (decision === null) {
+        return; // wait for a valid key
+      }
+
+      const label = isStop
+        ? chalk.red("stop")
+        : decision === "once" ? chalk.green("allow once")
+        : decision === "always" ? chalk.green("allow always")
+        : chalk.red("deny");
+      finish(isStop ? "stop" : decision, label);
+    };
+
+    stdin.on("data", onData);
   });
 }
 
@@ -747,6 +1038,7 @@ async function handleSlashCommand(
       console.log(chalk.gray(`
   ${chalk.bold("Commands:")}
     /help          Show this help
+    /status        Show current model, provider, session state
     /exit          Exit (saves session)
     /clear         Clear conversation history
     /model         Open interactive model picker (mouse + keyboard)
@@ -760,8 +1052,33 @@ async function handleSlashCommand(
     /mcp           List MCP servers and tools
     /tools         List available tools
     /cost          Estimate session cost
+
+  ${chalk.bold("Shortcuts:")}
+    ESC / Ctrl+C   Interrupt current turn (press Ctrl+C twice to exit)
+    Multi-line     Paste multi-line text — it will be sent as one message
 `));
       break;
+
+    case "status": {
+      const usage = tokenTracker.getSessionUsage();
+      console.log();
+      console.log(chalk.bold.cyan("  Status"));
+      console.log(chalk.gray("  ─────────────────────────────────────────"));
+      console.log(chalk.gray("  model      ") + chalk.white(config.model));
+      console.log(chalk.gray("  sdk        ") + chalk.white(config.provider));
+      if (config.baseUrl) console.log(chalk.gray("  url        ") + chalk.gray(config.baseUrl));
+      console.log(chalk.gray("  session    ") + chalk.white(session.id));
+      console.log(chalk.gray("  cwd        ") + chalk.gray(process.cwd()));
+      console.log(chalk.gray("  messages   ") + chalk.white(String(session.messages.length)));
+      console.log(chalk.gray("  turns      ") + chalk.white(String(usage.turns)));
+      console.log(chalk.gray("  tokens     ") + chalk.yellow(`${usage.total.promptTokens}p`) + " + " + chalk.green(`${usage.total.completionTokens}c`) + " = " + chalk.bold(String(usage.total.totalTokens)));
+      console.log(chalk.gray("  sandbox    ") + (config.sandbox ? chalk.yellow("on") : chalk.gray("off")));
+      console.log(chalk.gray("  auto-approve ") + (config.autoApprove ? chalk.red.bold("ON") : chalk.gray("off")));
+      if (skills) console.log(chalk.gray("  skills     ") + chalk.white(String(skills.getAll().length)));
+      if (mcp) console.log(chalk.gray("  mcp        ") + chalk.white(`${mcp.getServerNames().length} servers · ${mcp.getTools().length} tools`));
+      console.log();
+      break;
+    }
 
     case "model": {
       if (rest.length > 0) {
@@ -785,6 +1102,7 @@ async function handleSlashCommand(
         config.provider = resolved.npm;
         session.model = config.model;
         saveConfig({ opencodeModel: modelStr });
+        rl.setPrompt(buildPrompt(config));
         console.log(chalk.green(`  ✓ Model: ${resolved.providerId}/${resolved.modelId}`));
         console.log(chalk.gray(`    Provider: ${resolved.providerName}`));
       } else {
@@ -800,6 +1118,7 @@ async function handleSlashCommand(
             config.provider = resolved.npm;
             session.model = config.model;
             saveConfig({ opencodeModel: selected });
+            rl.setPrompt(buildPrompt(config));
             console.log(chalk.green(`  ✓ Model: ${resolved.providerId}/${resolved.modelId}`));
             console.log(chalk.gray(`    Provider: ${resolved.providerName}`));
           }

@@ -1,4 +1,4 @@
-import type { Tool, ToolResult } from "../types.js";
+import type { Tool, ToolResult, ToolContext } from "../types.js";
 import { bashTool } from "./bash.js";
 import { readTool } from "./read.js";
 import { writeTool } from "./write.js";
@@ -87,6 +87,7 @@ export class ToolRegistry {
   async execute(
     name: string,
     args: Record<string, unknown>,
+    ctx?: ToolContext,
   ): Promise<ToolResult> {
     const tool = this.tools.get(name);
     if (!tool) {
@@ -101,9 +102,12 @@ export class ToolRegistry {
     }
 
     try {
-      return await tool.execute(parsedArgs);
+      return await tool.execute(parsedArgs, ctx);
     } catch (err: unknown) {
-      const error = err as { message: string };
+      const error = err as { message: string; name?: string };
+      if (error.name === "AbortError" || ctx?.signal?.aborted) {
+        return { output: `Aborted: ${name} was cancelled by user.`, error: true };
+      }
       return { output: `Error executing ${name}: ${error.message}`, error: true };
     }
   }
