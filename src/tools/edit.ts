@@ -1,6 +1,8 @@
 import type { Tool } from "../types.js";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { computeDiff } from "./diff.js";
+import { DIFF_MARKER } from "./write.js";
 
 export const editTool: Tool = {
   name: "edit",
@@ -112,9 +114,18 @@ export const editTool: Tool = {
         ? `${count} replacements`
         : `lines ${startLine}-${endLine}`;
       const fuzzyNote = usedFuzzy ? " (matched via whitespace-normalized fallback)" : "";
-      return {
-        output: `Edited ${filePath} (${lineInfo}). Changed ${oldNumLines} line(s) to ${newNumLines} line(s)${fuzzyNote}.`,
-      };
+
+      // Build a small colored diff for the UI. NOT sent to the LLM — otherwise
+      // the model tends to echo the diff back in its next reply.
+      const oldSnippet = oldString.split("\n");
+      const newSnippet = newString.split("\n");
+      const diffLines = computeDiff(oldSnippet, newSnippet, 2);
+      const summary = `Edited ${filePath} (${lineInfo}). Changed ${oldNumLines} line(s) to ${newNumLines} line(s)${fuzzyNote}.`;
+      const display = diffLines.length > 0
+        ? summary + DIFF_MARKER + `\x1b[36m@@ ${filePath} (${lineInfo}) @@\x1b[0m\n` + diffLines.join("\n")
+        : summary;
+
+      return { output: summary, display };
     } catch (err: unknown) {
       const error = err as { code?: string; message: string };
       if (error.code === "ENOENT") {

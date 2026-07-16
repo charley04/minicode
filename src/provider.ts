@@ -15,6 +15,7 @@ export interface LLMStreamCallbacks {
   onText: (text: string) => void;
   onThinking?: (text: string) => void;
   onToolCallDelta?: (index: number, id: string, name: string, argsDelta: string) => void;
+  signal?: AbortSignal;
 }
 
 export interface LLMProvider {
@@ -118,7 +119,7 @@ class OpenAIProvider implements LLMProvider {
       stream: true,
       stream_options: { include_usage: true },
       temperature: 0,
-    });
+    }, { signal: callbacks.signal });
 
     let content = "";
     let usage: TokenUsage | null = null;
@@ -261,7 +262,7 @@ class AnthropicProvider implements LLMProvider {
       system: systemPrompt,
       messages: anthropicMessages,
       tools: anthropicTools.length > 0 ? anthropicTools : undefined,
-    });
+    }, { signal: callbacks.signal });
 
     let content = "";
     let thinking = "";
@@ -383,6 +384,11 @@ class GoogleProvider implements LLMProvider {
     let completionTokens = 0;
 
     for await (const chunk of result.stream) {
+      if (callbacks.signal?.aborted) {
+        const err: any = new Error("Aborted");
+        err.name = "AbortError";
+        throw err;
+      }
       const chunkText = chunk.text();
       if (chunkText) {
         content += chunkText;

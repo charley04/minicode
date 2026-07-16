@@ -21,6 +21,8 @@ const DEFAULT_CONFIG: AppConfig = {
   mcpServers: [],
   skillsPaths: [],
   plugins: [],
+  maxContextTokens: 200000,
+  maxToolOutputSize: 51200,
 };
 
 export function getConfigDir(): string {

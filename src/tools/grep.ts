@@ -1,6 +1,7 @@
 import type { Tool } from "../types.js";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import { estimateTokens, truncateToTokenBudget } from "../token-estimator.js";
 
 const BINARY_EXTENSIONS = new Set([
   ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg",
@@ -42,6 +43,10 @@ export const grepTool: Tool = {
         type: "string",
         description: "File extension to include (e.g. '*.ts', '*.js'). If omitted, searches all text file types.",
       },
+      maxTokens: {
+        type: "number",
+        description: "Maximum estimated tokens for the output. If set, results will be truncated to fit within this budget. Helps manage context window usage.",
+      },
     },
     required: ["pattern"],
   },
@@ -50,6 +55,7 @@ export const grepTool: Tool = {
     const pattern = args.pattern as string;
     const searchPath = (args.path as string | undefined) || process.cwd();
     const include = args.include as string | undefined;
+    const maxTokens = args.maxTokens as number | undefined;
 
     let regex: RegExp;
     try {
@@ -135,6 +141,17 @@ export const grepTool: Tool = {
     if (results.length >= maxResults) {
       output += `\n... (results truncated at ${maxResults})`;
     }
+
+    // Apply maxTokens truncation if requested
+    if (maxTokens && maxTokens > 0) {
+      const estimatedTok = estimateTokens(output);
+      if (estimatedTok > maxTokens) {
+        const { truncated, note } = truncateToTokenBudget(output, maxTokens);
+        output = truncated;
+        if (note) output += `\n${note}`;
+      }
+    }
+
     return { output };
   },
 };

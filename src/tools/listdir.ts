@@ -1,6 +1,7 @@
 import type { Tool } from "../types.js";
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { estimateTokens, truncateToTokenBudget } from "../token-estimator.js";
 
 export const listdirTool: Tool = {
   name: "listdir",
@@ -13,12 +14,17 @@ export const listdirTool: Tool = {
         type: "string",
         description: "The directory path to list. Defaults to current working directory.",
       },
+      maxTokens: {
+        type: "number",
+        description: "Maximum estimated tokens for the output. If set, results will be truncated to fit within this budget. Helps manage context window usage.",
+      },
     },
     required: [],
   },
   requirePermission: false,
   async execute(args) {
     const path = (args.path as string | undefined) || process.cwd();
+    const maxTokens = args.maxTokens as number | undefined;
 
     try {
       const stat = statSync(path);
@@ -39,7 +45,19 @@ export const listdirTool: Tool = {
           return a.localeCompare(b);
         });
 
-      return { output: formatted.join("\n") || "(empty directory)" };
+      let output = formatted.join("\n") || "(empty directory)";
+
+      // Apply maxTokens truncation if requested
+      if (maxTokens && maxTokens > 0) {
+        const estimatedTok = estimateTokens(output);
+        if (estimatedTok > maxTokens) {
+          const { truncated, note } = truncateToTokenBudget(output, maxTokens);
+          output = truncated;
+          if (note) output += `\n${note}`;
+        }
+      }
+
+      return { output };
     } catch (err: unknown) {
       const error = err as { code?: string; message: string };
       if (error.code === "ENOENT") {

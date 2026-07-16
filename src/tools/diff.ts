@@ -75,7 +75,7 @@ export const diffTool: Tool = {
   },
 };
 
-function computeDiff(oldLines: string[], newLines: string[], context: number): string[] {
+export function computeDiff(oldLines: string[], newLines: string[], context: number): string[] {
   // Simple LCS-based diff
   const m = oldLines.length;
   const n = newLines.length;

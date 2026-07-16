@@ -91,12 +91,14 @@ function runPicker(entries: ModelEntry[], currentModel: string): Promise<string 
       // CRITICAL: remove our data listener before restoring
       stdin.removeListener("data", onData);
       restore();
-      // Clear the picker area
-      const filtered = getFiltered();
-      const totalLines = 5 + Math.min(filtered.length, maxVisible) + 1;
+      // Clear the picker area. The picker is always 5 + maxVisible lines tall
+      // because we pad with blank lines when there are fewer entries.
+      const totalLines = 5 + maxVisible;
       stdout.write(`\x1b[${totalLines}A\x1b[J`);
       resolve(result);
     }
+
+    let isFirstRender = true;
 
     function render(): void {
       const filtered = getFiltered();
@@ -108,9 +110,16 @@ function runPicker(entries: ModelEntry[], currentModel: string): Promise<string 
       const visible = filtered.slice(scrollOffset, scrollOffset + maxVisible);
       const width = 58;
 
-      // Move cursor to top of picker and clear
-      const lineCount = 5 + maxVisible + 1;
-      stdout.write(`\x1b[${lineCount}A\x1b[J`);
+      // Move cursor to top of picker and clear. On the first render the cursor
+      // is already at the top (after the initial blank line), so we only move
+      // up on subsequent renders. lineCount must equal the exact picker height
+      // (5 + maxVisible); the old +1 caused the picker to drift up one line per
+      // redraw, overwriting content above it.
+      const lineCount = 5 + maxVisible;
+      if (!isFirstRender) {
+        stdout.write(`\x1b[${lineCount}A\x1b[J`);
+      }
+      isFirstRender = false;
 
       // Box top
       const title = " Select Model ";

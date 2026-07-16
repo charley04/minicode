@@ -100,7 +100,7 @@ const LANG_ALIASES: Record<string, string> = {
 function renderCodeBlock(token: any): string {
   const langRaw = token.lang || "";
   const lang = LANG_ALIASES[langRaw.toLowerCase()] || langRaw || "text";
-  const code = token.text;
+  const code = String(token.text ?? "");
 
   let highlighted: string;
   try {
@@ -116,25 +116,29 @@ function renderCodeBlock(token: any): string {
     highlighted = code;
   }
 
-  const lines = highlighted.split("\n");
-  const maxLineNum = lines.length;
-  const numWidth = String(maxLineNum).length;
-  const innerWidth = TERMINAL_WIDTH - numWidth - 6;
+  const lines = highlighted.replace(/\n$/, "").split("\n");
+  const numWidth = String(lines.length).length;
+  const innerWidth = Math.max(20, TERMINAL_WIDTH - numWidth - 6);
 
-  const langLabel = langRaw || lang;
-  const headerContent = langLabel ? ` ${langLabel} ` : " ";
-  const headerRight = "─".repeat(Math.max(0, innerWidth - headerContent.length));
-  const header = chalk.gray("  ┌─") + chalk.cyan(headerContent) + chalk.gray(headerRight + "┐");
-  const footer = chalk.gray("  └" + "─".repeat(innerWidth + 1) + "┘");
+  // Header with language label; footer just closes it. No hard right border,
+  // so wrapped long lines stay readable in narrow terminals.
+  const langLabel = langRaw || (lang === "text" ? "" : lang);
+  const headerTag = langLabel ? chalk.bgBlue.white.bold(` ${langLabel} `) : chalk.bgGray.white.bold(" code ");
+  const headerRule = chalk.gray("─".repeat(Math.max(0, innerWidth - langLabel.length - 4)));
+  const header = "  " + headerTag + " " + headerRule;
+  const footer = "  " + chalk.gray("─".repeat(innerWidth + numWidth + 2));
 
   const body = lines
     .map((line: string, i: number) => {
-      const num = chalk.gray("  " + String(i + 1).padStart(numWidth) + " │ ");
-      const visibleLen = stripAnsi(line);
-      const truncated = visibleLen.length > innerWidth
-        ? line.slice(0, innerWidth - 3) + chalk.gray("...")
+      const num = chalk.gray(String(i + 1).padStart(numWidth) + " │ ");
+      // Truncate the raw visible line if crazy long, but keep colors intact
+      // by slicing the highlighted string only when the plain length exceeds
+      // innerWidth. Approximate — most lines fit.
+      const plain = stripAnsi(line);
+      const rendered = plain.length > innerWidth
+        ? line.slice(0, innerWidth + 20) + chalk.gray("…")
         : line;
-      return num + truncated;
+      return "  " + num + rendered;
     })
     .join("\n");
 
