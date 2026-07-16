@@ -1,6 +1,6 @@
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 export interface OpencodeModelDef {
   name?: string;
@@ -48,6 +48,19 @@ function findOpencodeConfigPath(): string | null {
     if (existsSync(p)) return p;
   }
   return null;
+}
+
+function defaultOpencodeConfigPath(): string {
+  return join(homedir(), ".config", "opencode", "opencode.json");
+}
+
+export function saveOpencodeConfig(config: OpencodeConfig, path?: string): void {
+  const targetPath = path || findOpencodeConfigPath() || defaultOpencodeConfigPath();
+  const dir = dirname(targetPath);
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+  writeFileSync(targetPath, JSON.stringify(config, null, 2) + "\n", "utf-8");
 }
 
 export function loadOpencodeConfig(): OpencodeConfig | null {

@@ -1,11 +1,12 @@
 import type { Tool } from "../types.js";
 import { readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
+import { estimateTokens, truncateLinesToTokenBudget } from "../token-estimator.js";
 
 export const readTool: Tool = {
   name: "read",
   description:
-    "Reads the contents of a file. Returns content with line number prefixes (e.g. '1: code'). IMPORTANT: When using edit/multi_edit after read, strip the 'N: ' prefix — the edit tool expects actual file content without line numbers. Supports offset/limit for large files. Set full=true to read without line number prefixes (useful when you need to copy exact content for edit oldString). Lines longer than 2000 chars are truncated. For large files (>500 lines), use offset/limit to read in chunks.",
+    "Reads the contents of a file. Returns content with line number prefixes (e.g. '1: code'). IMPORTANT: When using edit/multi_edit after read, strip the 'N: ' prefix — the edit tool expects actual file content without line numbers. Supports offset/limit for large files. Set full=true to read without line number prefixes (useful when you need to copy exact content for edit oldString). Lines longer than 2000 chars are truncated. For large files (>500 lines), use offset/limit to read in chunks. Set maxTokens to automatically truncate output to fit within a token budget.",
   parameters: {
     type: "object",
     properties: {
@@ -25,6 +26,10 @@ export const readTool: Tool = {
         type: "boolean",
         description: "If true, return raw file content WITHOUT line number prefixes. Useful when you need exact content for edit tool matching. Defaults to false.",
       },
+      maxTokens: {
+        type: "number",
+        description: "Maximum estimated tokens for the output. If set, the output will be truncated (head/tail) to fit within this budget. Helps manage context window usage.",
+      },
     },
     required: ["filePath"],
   },
@@ -34,6 +39,7 @@ export const readTool: Tool = {
     const offset = (args.offset as number | undefined) ?? 1;
     const limit = (args.limit as number | undefined) ?? 2000;
     const full = (args.full as boolean | undefined) ?? false;
+    const maxTokens = args.maxTokens as number | undefined;
 
     try {
       const stat = statSync(filePath);
@@ -93,6 +99,22 @@ export const readTool: Tool = {
       if (totalLines > end) {
         output += `\n\n(showing lines ${start + 1}-${end} of ${totalLines}. Use offset=${end + 1} to read more.)`;
       }
+
+      // Apply maxTokens truncation if requested
+      if (maxTokens && maxTokens > 0) {
+        const estimatedTok = estimateTokens(output);
+        if (estimatedTok > maxTokens) {
+          const lines = output.split("\n");
+          const headKeep = Math.max(10, Math.floor(lines.length * 0.6));
+          const tailKeep = Math.max(3, Math.floor(lines.length * 0.1));
+          const result = truncateLinesToTokenBudget(lines, maxTokens, headKeep, tailKeep);
+          output = result.lines.join("\n");
+          if (result.note) {
+            output += `\n${result.note}`;
+          }
+        }
+      }
+
       return { output };
     } catch (err: unknown) {
       const error = err as { code?: string; message: string };

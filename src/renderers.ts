@@ -1,4 +1,5 @@
 import chalk from "chalk";
+import type { ToolCallLogEntry } from "./types.js";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { computeDiff } from "./tools/diff.js";
@@ -63,17 +64,20 @@ export function renderToolCallInline(name: string, args: Record<string, unknown>
 }
 
 /**
- * Tool result rendering: splits off any diff block emitted by edit/write,
- * shows a bounded preview of the plain text, and prints the diff verbatim
- * (already colorized by computeDiff).
+ * Tool result rendering: keeps output terse. The full result is already sent
+ * to the LLM; the terminal only needs a compact confirmation for the human.
+ * Exceptions: bash (real command output matters), errors (show diagnostics),
+ * and edit/write diffs (which the user usually wants to eyeball).
  */
 export function renderToolResult(
   name: string,
   output: string,
   error: boolean,
   indent: string = "  ",
+  durationMs?: number,
 ): string {
   const icon = error ? chalk.red("✗ ") : chalk.green("✓ ");
+  const dur = typeof durationMs === "number" ? chalk.gray(` ${formatDuration(durationMs)}`) : "";
 
   // Split diff block if present
   let mainText = output;
@@ -84,9 +88,23 @@ export function renderToolResult(
     diffText = output.slice(markerIdx + DIFF_MARKER.length);
   }
 
-  // Bash gets more lines; others are terser.
+  // Errors always show full body so the model (and user) can diagnose.
+  // Non-error results get a one-line summary for most tools.
+  if (!error) {
+    const summary = summarizeToolResult(name, mainText);
+    if (summary !== null) {
+      let result = indent + icon + summary + dur;
+      if (diffText) {
+        const diffLines = diffText.split("\n").map((l) => indent + "  " + l);
+        result += "\n" + diffLines.join("\n");
+      }
+      return result;
+    }
+  }
+
+  // Fallback: head/tail preview. Bash gets more lines than the rest.
   const isBash = name === "bash";
-  const headMax = isBash ? 25 : 12;
+  const headMax = isBash ? 25 : 6;
   const tailMax = isBash ? 5 : 0;
 
   const lines = mainText.split("\n");
@@ -113,7 +131,7 @@ export function renderToolResult(
   const bodyLines = body.split("\n").map((l) => indent + chalk.gray(l));
   const first = icon + bodyLines[0].replace(/^\s+/, "");
   const rest = bodyLines.slice(1).join("\n");
-  let result = indent + first + (rest ? "\n" + rest : "");
+  let result = indent + first + dur + (rest ? "\n" + rest : "");
 
   if (diffText) {
     // Prefix each diff line with indent, keep colors intact
@@ -122,6 +140,57 @@ export function renderToolResult(
   }
 
   return result;
+}
+
+/**
+ * One-line summaries for successful tool calls. Returning null means
+ * "fall back to the head/tail preview".
+ */
+function summarizeToolResult(name: string, output: string): string | null {
+  const lines = output.split("\n");
+  switch (name) {
+    case "read": {
+      // read output is "N: content" per line. Just report line count.
+      const first = lines[0] ?? "";
+      const m = /^(\d+):/.exec(first);
+      const startsAt = m ? Number(m[1]) : 1;
+      const last = [...lines].reverse().find((l) => /^\d+:/.test(l)) ?? "";
+      const em = /^(\d+):/.exec(last);
+      const endsAt = em ? Number(em[1]) : startsAt + lines.length - 1;
+      return chalk.gray(`read ${endsAt - startsAt + 1} lines (${startsAt}-${endsAt})`);
+    }
+    case "listdir": {
+      const entries = lines.filter((l) => l.trim().length > 0);
+      const dirs = entries.filter((l) => l.trim().endsWith("/")).length;
+      const files = entries.length - dirs;
+      return chalk.gray(`${entries.length} entries (${dirs} dirs, ${files} files)`);
+    }
+    case "glob": {
+      const entries = lines.filter((l) => l.trim().length > 0);
+      if (entries.length === 0) return chalk.gray("no matches");
+      const preview = entries.slice(0, 3).join(chalk.gray(", "));
+      const more = entries.length > 3 ? chalk.gray(` (+${entries.length - 3} more)`) : "";
+      return chalk.gray(`${entries.length} match${entries.length === 1 ? "" : "es"}: `) + preview + more;
+    }
+    case "grep": {
+      const entries = lines.filter((l) => l.trim().length > 0);
+      return chalk.gray(`${entries.length} match${entries.length === 1 ? "" : "es"}`);
+    }
+    case "todo": {
+      // Keep the first line (progress summary) but drop the noisy list.
+      const first = lines.find((l) => l.trim().length > 0) ?? "";
+      return chalk.gray(first.trim());
+    }
+    case "write":
+    case "edit":
+    case "multi_edit": {
+      // Keep the concise header line the tool already emits; drop file dumps.
+      const first = lines.find((l) => l.trim().length > 0) ?? "done";
+      return chalk.gray(first.trim());
+    }
+    default:
+      return null;
+  }
 }
 
 /**
@@ -213,4 +282,41 @@ function truncateOneLine(s: string, max: number): string {
   const oneLine = s.replace(/\r?\n/g, " ↵ ");
   if (oneLine.length <= max) return oneLine;
   return oneLine.slice(0, max - 1) + "…";
+}
+
+/** Human-friendly duration label. */
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(2)}s`;
+}
+
+/** Collapse to a single line and cap the length for summary previews. */
+function truncatePreview(s: string, max = 200): string {
+  const oneLine = s.replace(/\r?\n/g, " ↵ ").trim();
+  return oneLine.length <= max ? oneLine : oneLine.slice(0, max - 1) + "…";
+}
+
+/**
+ * End-of-task report listing every tool call with its input, output and the
+ * time it took. Shown once after a task finishes so the user gets a compact
+ * recap of what the agent did.
+ */
+export function renderTaskSummary(tools: ToolCallLogEntry[]): string {
+  if (!tools || tools.length === 0) return "";
+  const lines: string[] = [];
+  lines.push("");
+  lines.push(chalk.bold.cyan("── Task summary ──"));
+  let totalMs = 0;
+  tools.forEach((t, i) => {
+    totalMs += t.durationMs;
+    const icon = t.error ? chalk.red("✗") : chalk.green("✓");
+    const dur = chalk.gray(formatDuration(t.durationMs));
+    lines.push(`  ${chalk.gray(String(i + 1) + ".")} ${icon} ${chalk.bold(t.name)}  ${dur}`);
+    const argsJson = truncatePreview(JSON.stringify(t.args), 200);
+    lines.push(chalk.gray(`     in:  ${argsJson}`));
+    const outText = truncatePreview(t.display ?? t.output, 200);
+    lines.push(chalk.gray(`     out: ${outText}`));
+  });
+  lines.push(chalk.gray(`  ${tools.length} tool call(s) · total ${formatDuration(totalMs)}`));
+  return lines.join("\n");
 }
