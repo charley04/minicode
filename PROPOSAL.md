@@ -639,49 +639,58 @@ func init() {
 
 ### 3.5 配置体系
 
-```yaml
-# ~/.config/minicode/config.yaml (全局)
-# 或 .minicode/config.yaml (项目级)
+```json
+// ~/.minicode/config.json
 
-model:
-  provider: anthropic        # openai / anthropic / google / local / custom
-  name: claude-sonnet-4-20250514
-  # api_key: 从环境变量读取
-  # base_url: 自定义 API 地址
-  temperature: 0
-  max_tokens: 16384
+{
+  "autoApprove": false,
+  "sandbox": false,
+  "sandboxImage": "node:22-slim",
+  "maxTurns": 50,
+  "maxContextTokens": 200000,
+  "mcpServers": [
+    {
+      "name": "filesystem",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    },
+    {
+      "name": "github",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      }
+    }
+  ],
+  "skillsPaths": [],
+  "plugins": [
+    { "name": "auto-lint", "enabled": true, "config": {} },
+    { "name": "git-status", "enabled": true, "config": {} },
+    { "name": "file-watcher", "enabled": false, "config": {} }
+  ]
+}
+```
 
-agent:
-  mode: act                  # plan / act
-  max_turns: 50
-
-permissions:
-  bash: ask                  # auto / ask / deny
-  write: ask
-  edit: ask
-  read: auto
-  web_fetch: auto
-
-mcp:
-  servers:
-    - name: filesystem
-      transport: stdio
-      command: npx
-      args: ["-y", "@modelcontextprotocol/server-filesystem", "."]
-    - name: github
-      transport: stdio
-      command: npx
-      args: ["-y", "@modelcontextprotocol/server-github"]
-      env:
-        GITHUB_TOKEN: ${GITHUB_TOKEN}
-
-skills:
-  paths:
-    - ~/.config/minicode/skills
-    - .minicode/skills
-
-# 项目规则文件 (类似 AGENTS.md)
-# .minicode/rules.md 或 AGENTS.md
+**模型配置** (读取 opencode 的 `opencode.json`):
+```json
+{
+  "model": "volcengine-plan/ark-code-latest",
+  "provider": {
+    "volcengine-plan": {
+      "npm": "@ai-sdk/openai",
+      "options": {
+        "apiKey": "your-api-key",
+        "baseURL": "https://example.com/api/v3"
+      },
+      "models": {
+        "ark-code-latest": { "name": "ark-code-latest" }
+      }
+    }
+  }
+}
 ```
 
 ---
@@ -690,57 +699,45 @@ skills:
 
 ```
 minicode/
-├── cmd/
-│   └── minicode/
-│       └── main.go              # 入口
-├── internal/
-│   ├── agent/                   # Agent 核心
-│   │   ├── loop.go              # Agent 循环
-│   │   ├── mode.go              # plan/act 模式
-│   │   └── context.go           # 上下文构建
-│   ├── tool/                    # 工具系统
-│   │   ├── registry.go          # 工具注册表
-│   │   ├── bash.go              # Bash 工具
-│   │   ├── file.go              # 文件读写工具
-│   │   ├── edit.go              # 编辑工具
-│   │   ├── glob.go              # Glob 工具
-│   │   ├── grep.go              # Grep 工具
-│   │   ├── webfetch.go          # 网页抓取
-│   │   ├── todo.go              # 任务列表
-│   │   └── permission.go        # 权限门控
-│   ├── provider/                # LLM Provider
-│   │   ├── provider.go          # 接口定义
-│   │   ├── openai.go            # OpenAI 兼容
-│   │   ├── anthropic.go         # Anthropic
-│   │   ├── google.go            # Google Gemini
-│   │   └── local.go             # 本地模型
-│   ├── session/                 # 会话管理
-│   │   ├── session.go           # Session 结构
-│   │   └── store.go             # SQLite 持久化
-│   ├── extension/               # 扩展层
-│   │   ├── mcp.go               # MCP 客户端
-│   │   ├── skill.go             # Skills 管理
-│   │   └── plugin.go            # Go 插件
-│   ├── tui/                     # 终端 UI
-│   │   ├── app.go               # Bubble Tea App
-│   │   ├── chat.go              # 聊天视图
-│   │   ├── input.go             # 输入框
-│   │   └── render.go            # Markdown 渲染
-│   ├── cli/                     # CLI 命令
-│   │   ├── root.go              # 根命令
-│   │   ├── chat.go              # minicode chat
-│   │   ├── run.go               # minicode run "task"
-│   │   └── config.go            # minicode config
-│   └── config/                  # 配置管理
-│       └── config.go
-├── pkg/                         # 公开 SDK 包
-│   └── minicode/
-│       ├── agent.go             # Agent API
-│       ├── tool.go              # Tool 接口
-│       └── provider.go          # Provider 接口
-├── go.mod
-├── go.sum
-└── Makefile
+├── src/
+│   ├── index.ts              # CLI 入口
+│   ├── agent.ts              # Agent 核心循环
+│   ├── provider.ts           # LLM Provider 工厂 (OpenAI/Anthropic/Google)
+│   ├── config.ts             # 配置加载
+│   ├── session.ts            # 会话持久化 (JSON)
+│   ├── token-tracker.ts      # Token 用量追踪
+│   ├── token-estimator.ts    # Token 估算
+│   ├── skills.ts             # Skills 管理
+│   ├── mcp.ts               # MCP 客户端
+│   ├── plugins.ts            # 插件系统
+│   ├── sandbox.ts            # Docker 沙箱
+│   ├── server.ts             # HTTP/WS API 服务
+│   ├── model-picker.ts       # 交互式模型选择器
+│   ├── system-prompt.ts      # System prompt 构建
+│   ├── user-message.ts       # 用户消息处理
+│   ├── markdown.ts           # Markdown 渲染
+│   ├── progress.ts           # 进度条
+│   ├── spinner.ts            # 加载动画
+│   ├── renderers.ts          # 渲染工具
+│   ├── completer.ts          # 命令补全
+│   ├── paste-input.ts        # 粘贴处理
+│   ├── opencode-config.ts    # opencode 配置解析
+│   ├── tools/
+│   │   ├── index.ts          # 工具注册表
+│   │   ├── bash.ts           # Bash 执行
+│   │   ├── read.ts           # 读文件
+│   │   ├── write.ts          # 写文件
+│   │   ├── edit.ts           # 精确编辑 (search & replace)
+│   │   ├── multi-edit.ts     # 批量编辑
+│   │   ├── diff.ts           # diff 对比
+│   │   ├── glob.ts           # 文件模式匹配
+│   │   ├── grep.ts           # 内容搜索
+│   │   ├── listdir.ts        # 列目录
+│   │   └── todo.ts           # 任务列表
+│   └── types.ts              # 类型定义
+├── package.json
+├── tsconfig.json
+└── README.md
 ```
 
 ---
@@ -750,51 +747,50 @@ minicode/
 #### Phase 1: MVP (4 周)
 > 目标: 能对话、能读写文件、能执行命令
 
-- [ ] 项目骨架 (Go module + Cobra CLI + 目录结构)
-- [ ] Provider 层 (OpenAI 兼容 + Anthropic)
-- [ ] Agent 循环 (streaming + 工具调用)
-- [ ] 核心工具 (bash/read/write/edit/glob/grep)
-- [ ] 权限门控 (auto/ask/deny)
-- [ ] 基础 TUI (Bubble Tea 聊天界面)
-- [ ] 配置文件 (YAML)
+- [x] 项目骨架 (TypeScript + Node.js)
+- [x] Provider 层 (OpenAI 兼容 + Anthropic)
+- [x] Agent 循环 (streaming + 工具调用)
+- [x] 核心工具 (bash/read/write/edit/glob/grep)
+- [x] 权限门控 (auto/ask/deny)
+- [x] 基础 CLI (Commander 交互界面)
+- [x] 配置文件 (JSON)
 
 #### Phase 2: 可用性 (3 周)
 > 目标: 会话持久化 + Skills + 项目上下文
 
-- [ ] SQLite 会话持久化
-- [ ] 会话列表 / 恢复 / 删除
-- [ ] Skills 系统 (SKILL.md 自动发现)
-- [ ] 项目上下文 (AGENTS.md / .minicode/rules.md)
-- [ ] 上下文截断策略 (token 管理)
-- [ ] Todo 工具 (任务列表)
-- [ ] WebFetch 工具
+- [x] JSON 会话持久化
+- [x] 会话列表 / 恢复 / 删除
+- [x] Skills 系统 (SKILL.md 自动发现)
+- [x] 项目上下文 (AGENTS.md / .minicode/rules.md)
+- [x] 上下文截断策略 (token 管理)
+- [x] Todo 工具 (任务列表)
+- [x] diff/multi_edit 工具
 
 #### Phase 3: 扩展性 (3 周)
 > 目标: MCP + 多 Provider + 插件
 
-- [ ] MCP 客户端 (stdio/sse/http)
-- [ ] Google Gemini Provider
-- [ ] 本地模型 Provider (Ollama)
-- [ ] Go 插件接口
-- [ ] Subagent 机制 (并行搜索)
-- [ ] Hook 事件系统 (PreToolUse/PostToolUse/SessionStart)
+- [x] MCP 客户端 (stdio/sse/http)
+- [x] Google Gemini Provider
+- [x] 本地模型 Provider (Ollama)
+- [x] 插件接口 (TypeScript module)
+- [x] 内置插件 (auto-lint, git-status, file-watcher)
 
 #### Phase 4: 体验优化 (2 周)
 > 目标: 生产可用
 
-- [ ] Plan 模式 (只读分析)
-- [ ] Markdown 渲染 (代码高亮)
-- [ ] 流式输出优化 (打字机效果)
-- [ ] Token 用量追踪 + 成本估算
-- [ ] 操作日志 + 调试模式
+- [x] Markdown 渲染 (代码高亮)
+- [x] 流式输出优化 (打字机效果)
+- [x] Token 用量追踪 + 成本估算
+- [x] 沙箱执行 (Docker 隔离)
+- [x] HTTP API 服务模式
 - [ ] 安装脚本 (curl | bash)
 - [ ] Homebrew / Scoop 包
 
 #### Phase 5: 高级特性 (持续)
+- [ ] Plan 模式 (只读分析)
+- [ ] Hook 事件系统 (PreToolUse/PostToolUse/SessionStart)
+- [ ] Subagent 机制 (并行搜索)
 - [ ] Headless 模式 (CI/CD 集成)
-- [ ] 沙箱执行 (Docker 隔离)
-- [ ] 多 Agent 协作
-- [ ] HTTP API 服务模式
 - [ ] Desktop 应用 (Wails)
 - [ ] 自定义 Agent Profile
 
@@ -802,16 +798,17 @@ minicode/
 
 ### 3.8 关键设计决策
 
-| 决策点 | 选择 | 理由 |
-|--------|------|------|
-| 语言 | Go | 单二进制部署，Crush/Goose 已验证 |
-| TUI 框架 | Bubble Tea | Go 生态最佳 TUI，Crush 同栈 |
-| LLM 交互 | 原生 HTTP | 避免重依赖，完全控制 streaming |
-| 数据库 | SQLite (pure Go) | 无 CGO，跨平台零配置 |
-| MCP SDK | mcp-go | Go 唯一成熟选择 |
-| Skills 标准 | SKILL.md 兼容 | 复用 Claude Code/Crush 生态 |
-| 配置格式 | YAML | 人类可读，多层覆盖 |
-| 插件机制 | Go interface | 编译时安全，无运行时动态加载风险 |
+| 决策点 | 原设计方案 | 实际实现 |
+|--------|-----------|----------|
+| 语言 | Go | TypeScript/Node.js |
+| TUI 框架 | Bubble Tea | Commander CLI |
+| LLM 交互 | 原生 HTTP | 各 Provider SDK |
+| 数据库 | SQLite (pure Go) | JSON 文件存储 |
+| MCP SDK | mcp-go | @modelcontextprotocol/sdk |
+| Skills 标准 | SKILL.md 兼容 | SKILL.md 兼容 |
+| 配置格式 | YAML | JSON (opencode.json) |
+| 插件机制 | Go interface | TypeScript module |
+| 部署方式 | 单二进制 | npm 包 |
 
 ---
 
@@ -819,10 +816,9 @@ minicode/
 
 | 风险 | 影响 | 对策 |
 |------|------|------|
-| Go AI 生态弱 | Provider 适配成本高 | 自建 Provider 抽象层，参考 Vercel AI SDK 设计 |
-| MCP Go SDK 不成熟 | MCP 集成不稳定 | 封装适配层，保留替换空间；优先支持 stdio |
-| TUI 复杂交互难 | 用户体验受限 | 参考 Crush TUI 设计，渐进式增强 |
-| 单 Agent 能力上限 | 复杂任务处理弱 | Phase 3 引入 Subagent 机制 |
+| Node.js 运行时依赖 | 部署需要 Node 环境 | 考虑未来迁移 Go 版本 |
+| JSON 文件会话存储 | 并发写入可能丢失数据 | 后续升级 SQLite |
+| 非 TUI 交互 | 用户体验受限 | 后续引入 Bubble Tea TUI |
 | Provider API 变化 | 兼容性中断 | Provider 层抽象 + 版本化适配 |
 
 ---
@@ -841,3 +837,87 @@ minicode/
 - 比 Claude Code 更开放 (完全开源 vs 闭源核心)
 - 比 Aider 更现代 (MCP + Skills vs 无扩展机制)
 - 比 Crush 更聚焦编码 (内置编码工具 vs 通用 Agent)
+
+---
+
+## 五、MiniCode 实际实现
+
+> 以下为当前代码库的实际实现状态，与上述 Go 方案设计有所差异。
+
+### 5.1 技术栈
+
+| 层 | 选型 | 实际依赖 |
+|----|------|----------|
+| **语言** | TypeScript (Node.js) | TypeScript 5.7 + Node.js 18+ |
+| **LLM 交互** | 各 Provider SDK | `@anthropic-ai/sdk`, `openai`, `@google/generative-ai` |
+| **MCP** | 官方 SDK | `@modelcontextprotocol/sdk` |
+| **CLI** | Commander | `commander` |
+| **Markdown** | Marked | `marked` + `cli-highlight` |
+| **WebSocket** | ws | `ws` |
+| **工具注册** | 自研 | 内置 10 个工具 + MCP 工具 |
+
+### 5.2 实际目录结构
+
+```
+minicode/
+├── src/
+│   ├── index.ts              # CLI 入口
+│   ├── agent.ts              # Agent 核心循环
+│   ├── provider.ts           # LLM Provider 工厂
+│   ├── config.ts             # 配置加载
+│   ├── session.ts            # 会话持久化
+│   ├── token-tracker.ts      # Token 用量追踪
+│   ├── skills.ts             # Skills 管理
+│   ├── mcp.ts               # MCP 客户端
+│   ├── plugins.ts            # 插件系统
+│   ├── sandbox.ts            # Docker 沙箱
+│   ├── server.ts             # HTTP/WS API 服务
+│   ├── model-picker.ts       # 交互式模型选择器
+│   ├── tools/
+│   │   ├── index.ts          # 工具注册表
+│   │   ├── bash.ts           # Bash 执行
+│   │   ├── read.ts           # 读文件
+│   │   ├── write.ts          # 写文件
+│   │   ├── edit.ts           # 精确编辑 (search & replace)
+│   │   ├── multi-edit.ts     # 批量编辑
+│   │   ├── diff.ts           # diff 对比
+│   │   ├── glob.ts           # 文件模式匹配
+│   │   ├── grep.ts           # 内容搜索
+│   │   ├── listdir.ts        # 列目录
+│   │   └── todo.ts           # 任务列表
+│   └── *.ts                  # 其他工具函数
+├── package.json
+└── tsconfig.json
+```
+
+### 5.3 已实现功能
+
+- ✅ **10 个内置工具**: bash, read, write, edit, multi_edit, diff, glob, grep, listdir, todo
+- ✅ **多 Provider 支持**: OpenAI, Anthropic, Google Gemini, OpenAI 兼容 API
+- ✅ **opencode 配置兼容**: 直接读取 `opencode.json`
+- ✅ **MCP 支持**: stdio / sse / http 三种传输
+- ✅ **Skills 系统**: 自动发现 `SKILL.md` 文件
+- ✅ **会话持久化**: JSON 文件存储，可恢复对话
+- ✅ **Token 追踪**: 每轮和会话级别用量统计
+- ✅ **沙箱模式**: Docker 容器隔离 bash 执行
+- ✅ **HTTP/WS API**: REST API + WebSocket 实时推送
+- ✅ **插件系统**: 内置 auto-lint, git-status, file-watcher 插件
+- ✅ **交互式模型选择**: 鼠标键盘操作
+
+### 5.4 与设计方案的差异
+
+| 项目 | 原设计方案 | 实际实现 |
+|------|-----------|----------|
+| 语言 | Go | TypeScript/Node.js |
+| 数据库 | SQLite | JSON 文件会话存储 |
+| TUI | Bubble Tea | Commander CLI (非 TUI) |
+| 部署 | 单二进制 | npm 包 |
+| 插件接口 | Go interface | TypeScript module |
+
+### 5.5 后续优化方向
+
+1. **性能优化**: 考虑迁移至 Go 版本实现单二进制部署
+2. **TUI 增强**: 引入交互式终端界面
+3. **数据库**: 升级至 SQLite 持久化
+4. **MCP 工具发现**: 增强工具注册和权限管理
+5. **Skill 匹配**: 引入更智能的 Skill 自动激活机制

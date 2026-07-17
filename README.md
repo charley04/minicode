@@ -4,16 +4,14 @@ A lightweight AI coding agent for the terminal. Reads your opencode config, supp
 
 ## Install
 
-### From npm (when published)
-
 ```bash
 npm install -g minicode-agent
 ```
 
-### From local tarball
+Or run directly from source:
 
 ```bash
-npm install -g minicode-agent-1.0.0.tgz
+npx minicode-agent
 ```
 
 ## Quick Start
@@ -39,9 +37,10 @@ minicode
 - **Markdown rendering**: Code blocks with syntax highlighting, tables, lists
 - **Token tracking**: Per-turn and session-level usage stats with cost estimation
 - **Code review**: Built-in security/correctness/performance review checklist
-- **Task progress**: Visual progress bar for multi-step tasks
+- **Sandbox mode**: Docker-based isolation for bash command execution
 - **Session persistence**: Conversations saved and resumable
 - **HTTP/WS API server**: `minicode server` for programmatic access
+- **Plugin system**: Built-in plugins (auto-lint, git-status, file-watcher)
 
 ## Usage
 
@@ -115,12 +114,88 @@ Config file locations (searched in order):
 1. `./opencode.json` (project-level)
 2. `~/.config/opencode/opencode.json` (global)
 
-MiniCode's own config (`~/.minicode/config.json`) stores non-model settings (auto-approve, sandbox, MCP servers, etc.).
+MiniCode's own config (`~/.minicode/config.json`) stores non-model settings:
+
+```json
+{
+  "autoApprove": false,
+  "sandbox": false,
+  "sandboxImage": "node:22-slim",
+  "maxTurns": 50,
+  "maxContextTokens": 200000,
+  "mcpServers": [
+    {
+      "name": "my-server",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@my/mcp-server"]
+    }
+  ],
+  "skillsPaths": [],
+  "plugins": [
+    { "name": "auto-lint", "enabled": true, "config": {} }
+  ]
+}
+```
 
 ## Requirements
 
 - Node.js 18+
 - An LLM API key configured in opencode.json
+
+## 打包与分发
+
+将 MiniCode 打包成可分发的 npm tarball，用于内网 / 同事间分享或作为发布到 npm registry 前的验证。
+
+### 构建产物
+
+```bash
+npm run build          # 通过 tsc 将 src/ 编译到 dist/
+npm pack               # 依据 package.json 的 "files" 白名单生成 tarball
+```
+
+产物为项目根目录下的 `minicode-agent-<version>.tgz`（当前 ~117KB）。包内容仅包含 [package.json](package.json) 中 `files` 字段声明的文件：
+
+- `dist/**/*` — 编译后的 JS / 类型声明
+- `README.md`
+- `package.json`（npm 自动包含）
+
+可用 `npm pack --dry-run` 预览包内文件，确认没有多余或缺失。
+
+### 本地安装分发包
+
+拿到 `.tgz` 后，用户在本机安装：
+
+```bash
+npm install -g ./minicode-agent-1.0.0.tgz
+minicode --help
+```
+
+`package.json` 中的 [`bin`](package.json#L6-L8) 字段会自动把 `minicode` 注册为全局命令。
+
+### 卸载
+
+```bash
+npm uninstall -g minicode-agent
+```
+
+### 版本更新流程
+
+1. 修改 `package.json` 中的 `version`（或用 `npm version patch|minor|major`）
+2. `npm run build`
+3. `npm pack`
+4. 分发新的 `.tgz`，用户重新 `npm install -g ./minicode-agent-x.y.z.tgz` 即可覆盖
+
+### 可选：发布到 npm registry
+
+若面向公开用户，可跳过 tarball 分发直接发布：
+
+```bash
+npm login
+npm publish --access public
+```
+
+发布后用户直接 `npm install -g minicode-agent`。注意同一个 version 只能发布一次。
 
 ## License
 
